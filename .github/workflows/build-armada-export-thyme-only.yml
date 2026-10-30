@@ -1,0 +1,191 @@
+
+name: Export Armada Xiaomi 10S
+
+on:
+  workflow_dispatch:
+    inputs:
+      container_ref:
+        description: "Armada 容器地址，留空使用 thyme-latest"
+        required: false
+        type: string
+        default: ""
+      console_mode:
+        description: "quiet 正常启动 / verbose 调试启动"
+        required: true
+        type: choice
+        options:
+          - quiet
+          - verbose
+        default: quiet
+      publish_release:
+        description: "是否同时发布 GitHub Release 分卷下载"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: export-thyme-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Export Xiaomi 10S rootfs and boot image
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Maximize build space
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e
+        with:
+          remove-codeql: true
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            podman e2fsprogs pigz python3 curl
+
+      - name: Login to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | sudo podman login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      - name: Export Xiaomi 10S
+        env:
+          CONTAINER_REF: ${{ inputs.container_ref }}
+          MODE: ${{ inputs.console_mode }}
+          DTBO_PARTS: ""
+        run: |
+          set -euxo pipefail
+
+          DEVICE="sm8250-xiaomi-thyme"
+          ROOT_PART="userdata"
+          OUT="$GITHUB_WORKSPACE/output"
+          REF="${CONTAINER_REF:-ghcr.io/daopica/armada-sheng-10s:thyme-latest}"
+
+          DEV="system_files/usr/lib/armada"
+
+          test -f "$DEV/devices/$DEVICE.conf"
+          test -f "$DEV/bootimg-args.$DEVICE"
+          test -f "$DEV/supported-dtbs.$DEVICE"
+
+          mkdir -p "$OUT"
+
+          echo "DTBO_PARTS=[$DTBO_PARTS]"
+
+          sudo --preserve-env=DTBO_PARTS bash \
+            .github/scripts/armada-export-flashable.sh \
+            "$REF" "$OUT" "$ROOT_PART" "$MODE" "$DEVICE"
+
+          sudo chown -R "$(id -u):$(id -g)" "$OUT" 
+
+          test -s "$OUT/rootfs.img"
+          test -s "$OUT/boot_b.img"
+          test -s "$OUT/flash.sh"
+          test -s "$OUT/flash.bat"
+          test -s "$OUT/MANIFEST.txt"
+          test -s "$OUT/SHA256SUMS"
+
+          grep -Fq 'root: PARTLABEL=userdata ext4 growfs' "$OUT/MANIFEST.txt"
+          grep -Fq 'root=PARTLABEL=userdata' "$OUT/MANIFEST.txt"
+
+          if grep -Eq 'fastboot erase dtbo_[ab]' "$OUT/flash.sh" "$OUT/flash.bat"; then
+            echo "::error::DTBO erase command detected"
+            exit 1
+          fi
+
+          echo "===== FLASH SCRIPT ====="
+          cat "$OUT/flash.sh"
+
+          echo "===== OUTPUT ====="
+          ls -lh "$OUT"
+
+      # 上传完整 rootfs.img，可直接下载，不需要合并分卷
+      - name: Upload complete flashable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: armada-xiaomi-10s-thyme
+          path: output/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      # Release 单文件限制，因此将 rootfs 分成 1900MB
+      - name: Prepare Release files
+        if: ${{ inputs.publish_release }}
+        run: |
+          set -euxo pipefail
+          cd output
+
+          split -b 1900M rootfs.img rootfs.img.part.
+
+          # Linux 合并脚本
+          cat > merge-rootfs.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          cat rootfs.img.part.* > rootfs.img
+          sha256sum -c SHA256SUMS
+          echo "rootfs.img ready"
+          EOF
+          chmod +x merge-rootfs.sh
+
+          # Windows 合并脚本
+          PARTS=$(printf '%s\n' rootfs.img.part.* | sort)
+          PARTS_CMD=$(printf '%s+' $PARTS)
+          PARTS_CMD="${PARTS_CMD%+}"
+
+          printf '@echo off\nchcp 65001 >nul\necho 正在合并 rootfs.img...\ncopy /b %s rootfs.img\necho 合并完成\npause\n' \
+            "$PARTS_CMD" > merge-rootfs.bat
+
+          sha256sum rootfs.img.part.* > SHA256SUMS.parts
+
+          echo "===== RELEASE FILES ====="
+          ls -lh
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: sm8250-xiaomi-thyme-flashable
+          name: Armada Xiaomi 10S Flashable
+          overwrite_files: true
+          body: |
+            ## Armada Xiaomi 10S (thyme)
+
+            Single-system installation.
+
+            Root filesystem:
+            - Partition: userdata
+            - GPT PARTLABEL: userdata
+            - Filesystem: ext4
+            - First boot: systemd growfs
+
+            Boot:
+            - boot_b.img
+            - Android boot header v1
+            - Page size: 2048
+            - boot_a and boot_b are flashed
+            - Existing DTBO partitions are preserved
+
+            Files:
+            - boot_b.img
+            - rootfs.img.part.*
+            - merge-rootfs.sh
+            - merge-rootfs.bat
+            - flash.sh
+            - flash.bat
+            - MANIFEST.txt
+            - SHA256SUMS
+          files: output/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

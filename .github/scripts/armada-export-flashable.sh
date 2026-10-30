@@ -56,7 +56,8 @@ mkdir -p "$OUT" "$MNT"
 echo "==> [1/7] Pull the Armada container"
 podman pull "${REF}"
 CID=$(podman create "${REF}")
-trap 'podman rm -f "$CID" 2>/dev/null || true' EXIT
+#trap 'podman rm -f "$CID" 2>/dev/null || true' EXIT
+trap '[ -z "$CID" ] || podman rm -f "$CID" 2>/dev/null || true' EXIT
 
 echo "==> [2/7] Create ext4 rootfs image (${IMG_SIZE})"
 # Measure the export stream first so IMG_SIZE always fits the content
@@ -134,7 +135,8 @@ case "$DEVICE" in
           echo "--- st-fts modules:"; find . -iname '*fts*' -o -iname '*stfts*' | head; \
           echo "--- touch firmware:"; find "$MNT"/usr/lib/firmware -iname '*ftb*' -o -iname '*fts*' | head -12; \
           echo "--- dts touch node:"; strings "$DTB" | grep -i -E 'fts|touch' | head -8; \
-          echo "--- audio firmware:"; ls "$MNT/usr/lib/firmware/cirrus" 2>/dev/null | head -8; \
+          #echo "--- audio firmware:"; ls "$MNT/usr/lib/firmware/cirrus" 2>/dev/null | head -8; \
+          echo "--- audio firmware:"; ls "$MNT/usr/lib/firmware/cirrus" 2>/dev/null | head -8 || true
           echo "--- usb gadget modules:"; find . -path '*gadget*' -name '*.ko*' | head -8 ) 2>&1 | tee "$OUT/touchchain.log"
         ;;
 esac
@@ -177,7 +179,8 @@ cp -a "$REPO/system_files/usr/share/alsa/ucm2/." "$MNT/usr/share/alsa/ucm2/"
     sm8250-xiaomi-thyme)
       echo "--- thyme UCM2:"; ls "$MNT/usr/share/alsa/ucm2/conf.d/sm8250/" 2>&1 | head
       echo "--- umi DSP firmware:"; ls "$MNT/usr/lib/firmware/qcom/sm8250/umi/" 2>&1 | head
-      echo "--- cirrus firmware:"; ls "$MNT/usr/lib/firmware/cirrus/" 2>&1 | head -8
+      #echo "--- cirrus firmware:"; ls "$MNT/usr/lib/firmware/cirrus/" 2>&1 | head -8
+      echo "--- cirrus firmware"; ls "$MNT/usr/lib/firmware/cirrus/" 2>/dev/null | head -8 || true
       echo "--- audio codec/amp modules:"; find "$MNT/usr/lib/modules/$KVER" -iname '*cs35l41*' -o -iname '*wcd93*' | head -8
       ;;
   esac

@@ -11,7 +11,8 @@ run_step() {
     local step="${1#./}"
     local start="${SECONDS}"
 
-    "$@"
+    bash "$step"
+    #"$@"  修改权限解决Permission denied
     printf '%s completed in %d seconds\n' "${step}" "$((SECONDS - start))"
 }
 
